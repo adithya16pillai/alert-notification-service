@@ -1,0 +1,2 @@
+# Integration tests run against a live Postgres + Redis (docker-compose).
+# Marker: @pytest.mark.integration
