@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fastapi import Header
+from fastapi import Depends, Header
 
 from app.config import get_settings
 from app.errors import AuthError
@@ -33,3 +33,24 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> Princ
     if x_api_key is None or x_api_key not in settings.api_keys:
         raise AuthError("invalid or missing X-API-Key")
     return Principal(api_key=x_api_key, producer=x_api_key[:8])
+
+
+async def require_tenant(
+    principal: Principal = Depends(require_api_key),
+    x_tenant_id: str | None = Header(default=None),
+) -> str:
+    """Resolve the caller's tenant for scoping the admin API.
+
+    v1 stand-in: the tenant comes from the ``X-Tenant-ID`` header. (08) will
+    replace this with the JWT ``tenant_id`` claim — at which point every query
+    that scopes by this value is enforced a second time by Postgres RLS. The
+    contract callers see — cross-tenant access is invisible (404, never 403) —
+    does not change. In ``local`` env a missing header defaults to ``local`` for
+    dev convenience, mirroring :func:`require_api_key`.
+    """
+    _ = principal
+    if x_tenant_id:
+        return x_tenant_id
+    if get_settings().env == "local":
+        return "local"
+    raise AuthError("missing X-Tenant-ID")

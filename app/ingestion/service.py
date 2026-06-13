@@ -109,7 +109,7 @@ async def ingest_alert(
             redis.set(redis_key, new_id, nx=True, ex=settings.idempotency_ttl_seconds),
             timeout=settings.channel_timeout_seconds,
         )
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         claimed = None  # fall through to the DB safety net
 
     if not claimed:

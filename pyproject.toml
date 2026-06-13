@@ -56,6 +56,15 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are called in argument defaults by
+# design; that's the framework idiom, not the B008 footgun.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Header",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

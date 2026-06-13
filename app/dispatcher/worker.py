@@ -31,6 +31,7 @@ from app.observability import configure_logging, get_logger
 from app.observability.metrics import critical_ttd_seconds, delivery_attempts_total
 from app.queue import ack_inflight, allow, pop_priority, reap_inflight
 from app.queue.priority_queue import refresh_queue_depth_metrics
+from app.recipients.cache import listen_for_invalidations
 from app.recipients.schemas import ResolvedTarget
 from app.recipients.service import resolve_targets
 
@@ -42,17 +43,25 @@ class Dispatcher:
         self.settings = get_settings()
         self._running = False
         self._last_janitor = 0.0
+        self._invalidation_task: asyncio.Task | None = None
 
     async def run_forever(self) -> None:
         register_defaults()
         self._running = True
+        # Subscribe to subscription-cache invalidations so a subscription change
+        # made via the API drops this worker's local cache within ~1s (03 §7).
+        self._invalidation_task = asyncio.create_task(listen_for_invalidations())
         log.info("dispatcher.start", batch_size=self.settings.worker_batch_size)
-        while self._running:
-            processed = await self.drain_once()
-            await refresh_queue_depth_metrics()
-            await self._maybe_run_maintenance()
-            if processed == 0:
-                await asyncio.sleep(self.settings.worker_poll_interval_ms / 1000)
+        try:
+            while self._running:
+                processed = await self.drain_once()
+                await refresh_queue_depth_metrics()
+                await self._maybe_run_maintenance()
+                if processed == 0:
+                    await asyncio.sleep(self.settings.worker_poll_interval_ms / 1000)
+        finally:
+            if self._invalidation_task is not None:
+                self._invalidation_task.cancel()
 
     def stop(self) -> None:
         self._running = False

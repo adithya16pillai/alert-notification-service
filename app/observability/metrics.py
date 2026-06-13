@@ -33,6 +33,16 @@ inflight_reaped_total = Counter(
 backpressure_shed_total = Counter(
     "ans_backpressure_shed_total", "Alerts shed at ingest by backpressure", ["severity"]
 )
+# Subscription cache (03): hit-rate drives end-to-end dispatch latency.
+subscription_cache_ops_total = Counter(
+    "ans_subscription_cache_ops_total",
+    "Subscription snapshot lookups",
+    ["result"],  # hit_local | hit_redis | miss
+)
+subscription_cache_invalidations_total = Counter(
+    "ans_subscription_cache_invalidations_total",
+    "Subscription cache invalidations published on a recipients write",
+)
 rate_limit_denials_total = Counter(
     "ans_rate_limit_denials_total", "Deliveries denied by rate limit", ["channel"]
 )

@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     info_shed_enabled: bool = False
     info_shed_threshold: int = 100_000
 
+    # --- Recipients / subscriptions (03) ---
+    # Per-tenant routing snapshot cache. The TTL is the upper bound on staleness
+    # if pub/sub invalidation fails entirely (03 §7).
+    subs_cache_key_prefix: str = "subs:tenant"
+    subs_cache_ttl_seconds: int = 60
+    subs_invalidate_channel: str = "cache:subs:invalidate"
+    # Cursor pagination: default page 50, hard cap 200 -> 400 (03 §4).
+    list_default_limit: int = 50
+    list_max_limit: int = 200
+
     # --- Channel adapters (04) ---
     channel_timeout_seconds: float = 5.0
     channel_max_retries: int = 3
