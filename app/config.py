@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     worker_batch_size: int = 50
     worker_poll_interval_ms: int = 100
     severities: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
+    # Starvation guard (02 §3): every Nth pop drains lowest-severity-first so a
+    # sustained high-severity flood can never park a non-empty lower queue forever.
+    queue_starvation_factor: int = 10
+    starvation_counter_key: str = "queue:alerts:starvation_counter"
+    # Visibility timeout (02 §6): popped-but-unacked alerts sit in this ZSET keyed
+    # by deadline; the reaper re-queues any whose deadline passed (worker died).
+    inflight_key: str = "queue:alerts:inflight"
+    inflight_ttl_seconds: int = 60
+    # Backpressure (02 §6): shed `info` ingestion with 503 once its backlog is huge.
+    # Off by default (opt-in per-tenant policy in v2); critical is never shed.
+    info_shed_enabled: bool = False
+    info_shed_threshold: int = 100_000
 
     # --- Channel adapters (04) ---
     channel_timeout_seconds: float = 5.0

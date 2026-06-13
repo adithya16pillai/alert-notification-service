@@ -23,12 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
 from app.config import get_settings
-from app.errors import IdempotencyConflict
+from app.errors import BackpressureShed, IdempotencyConflict
 from app.ingestion.models import Alert
-from app.ingestion.schemas import AlertIn
+from app.ingestion.schemas import AlertIn, Severity
 from app.observability import get_logger
-from app.observability.metrics import alerts_ingested_total
-from app.queue.priority_queue import enqueue_alert
+from app.observability.metrics import alerts_ingested_total, backpressure_shed_total
+from app.queue.priority_queue import enqueue_alert, queue_depth_for
 from app.redis_client import get_redis
 
 log = get_logger(__name__)
@@ -89,6 +89,16 @@ async def ingest_alert(
 ) -> IngestResult:
     settings = get_settings()
     redis = get_redis()
+
+    # --- Backpressure: shed `info` before any durable work if its backlog is huge
+    # (02 §6). Critical is never shed; the check is skipped for higher severities
+    # so the hot path pays one ZCARD only when it might actually reject. ---
+    if settings.info_shed_enabled and alert_in.severity is Severity.info:
+        if await queue_depth_for(Severity.info) > settings.info_shed_threshold:
+            backpressure_shed_total.labels(severity="info").inc()
+            log.warning("ingest.shed", tenant_id=alert_in.tenant_id, severity="info")
+            raise BackpressureShed("info backlog is saturated; retry later", field="severity")
+
     fingerprint = _fingerprint(alert_in)
     redis_key = f"idem:{alert_in.tenant_id}:{idempotency_key}"
     new_id = str(ULID())

@@ -28,8 +28,8 @@ from app.ingestion.janitor import GRACE_SECONDS, requeue_stale_accepted
 from app.ingestion.models import Alert
 from app.ingestion.schemas import Severity
 from app.observability import configure_logging, get_logger
-from app.observability.metrics import delivery_attempts_total
-from app.queue import allow, pop_priority
+from app.observability.metrics import critical_ttd_seconds, delivery_attempts_total
+from app.queue import ack_inflight, allow, pop_priority, reap_inflight
 from app.queue.priority_queue import refresh_queue_depth_metrics
 from app.recipients.schemas import ResolvedTarget
 from app.recipients.service import resolve_targets
@@ -50,7 +50,7 @@ class Dispatcher:
         while self._running:
             processed = await self.drain_once()
             await refresh_queue_depth_metrics()
-            await self._maybe_run_janitor()
+            await self._maybe_run_maintenance()
             if processed == 0:
                 await asyncio.sleep(self.settings.worker_poll_interval_ms / 1000)
 
@@ -61,15 +61,21 @@ class Dispatcher:
         alert_ids = await pop_priority(self.settings.worker_batch_size)
         for alert_id in alert_ids:
             await self._process_alert(alert_id)
+            # Ack one-by-one: an alert whose processing raised stays in-flight and
+            # is re-queued by the reaper (at-least-once, 02 §6).
+            await ack_inflight([alert_id])
         return len(alert_ids)
 
-    async def _maybe_run_janitor(self) -> None:
+    async def _maybe_run_maintenance(self) -> None:
+        """Periodically recover lost work: stale-accepted rows (01 §8) and
+        expired in-flight items whose worker died mid-batch (02 §6)."""
         now = time.monotonic()
         if now - self._last_janitor < GRACE_SECONDS:
             return
         self._last_janitor = now
         async with get_sessionmaker()() as session:
             await requeue_stale_accepted(session)
+            await reap_inflight(session)
 
     async def _process_alert(self, alert_id: str) -> None:
         async with get_sessionmaker()() as session:
@@ -79,6 +85,9 @@ class Dispatcher:
             if alert is None:
                 log.warning("dispatcher.alert_missing", alert_id=alert_id)
                 return
+            # Critical time-to-dispatch: receipt -> worker pickup (target <1s, 02 §4).
+            if alert.severity == Severity.critical.value:
+                critical_ttd_seconds.observe(max(0.0, time.time() - alert.received_at.timestamp()))
             targets = await resolve_targets(
                 session, tenant=alert.tenant_id, topic=alert.topic, severity=alert.severity
             )

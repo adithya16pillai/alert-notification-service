@@ -78,6 +78,12 @@ class QueueError(ServiceUnavailableError):
     code = "queue_error"
 
 
+class BackpressureShed(ServiceUnavailableError):
+    """`info` ingestion shed because its backlog exceeded the configured cap (02 §6)."""
+
+    code = "backpressure_shed"
+
+
 class ChannelError(AppError):
     """Base for channel-adapter delivery failures."""
 
