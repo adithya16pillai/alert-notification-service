@@ -1,0 +1,14 @@
+{% block subject %}[{{ alert.severity | upper }}] {{ alert.title | default('alert') }}{% endblock %}
+{% block body %}
+Severity: {{ alert.severity | upper }}
+Source: {{ alert.source | default('unknown') }}
+Occurred: {{ alert.occurred_at | default('unknown') }}
+Topic: {{ alert.topic | default('-') }}
+
+{{ alert.body | default('') }}
+
+Labels:
+{% for k, v in (alert.labels or {}) | dictsort %}  {{ k }}: {{ v }}
+{% endfor %}
+Alert ID: {{ alert.id | default('') }}
+{% endblock %}

@@ -1,0 +1,4 @@
+{# SMS has no subject; the body is hard-truncated to the segment budget by the
+   adapter (04 §9). Keep it terse. #}
+{% block subject %}{{ alert.title | default('alert') }}{% endblock %}
+{% block body %}[{{ alert.severity | upper }}] {{ alert.title | default('alert') }}{% if alert.labels.host %} ({{ alert.labels.host }}){% endif %}{% endblock %}

@@ -55,6 +55,17 @@ rate_limit_denials_total = Counter(
 delivery_attempts_total = Counter(
     "ans_delivery_attempts_total", "Delivery attempts", ["channel", "status"]
 )
+# Per-channel adapter health (04): error rate + circuit-breaker state panel.
+delivery_errors_total = Counter(
+    "ans_delivery_errors_total",
+    "Delivery failures by channel and classification",
+    ["channel", "classification"],  # transient_failure | permanent_failure
+)
+circuit_breaker_state = Gauge(
+    "ans_circuit_breaker_state",
+    "Per-channel circuit breaker state (0=closed, 1=open, 2=half-open)",
+    ["channel"],
+)
 delivery_latency = Histogram(
     "ans_delivery_latency_seconds", "End-to-end delivery latency", ["severity"]
 )

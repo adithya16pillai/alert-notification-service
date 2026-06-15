@@ -1,0 +1,7 @@
+{# Slack body is the message text posted via chat.postMessage. Subject is unused
+   by the adapter but kept for interface symmetry. #}
+{% block subject %}{{ alert.title | default('alert') }}{% endblock %}
+{% block body %}*[{{ alert.severity | upper }}]* {{ alert.title | default('alert') }}
+{{ alert.body | default('') }}
+_source:_ {{ alert.source | default('unknown') }}  _topic:_ {{ alert.topic | default('-') }}
+{% endblock %}

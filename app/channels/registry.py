@@ -30,3 +30,10 @@ def get_channel(name: str) -> Channel:
         return _registry[name]
     except KeyError as exc:
         raise NotFoundError(f"unknown channel {name!r}") from exc
+
+
+async def close_all() -> None:
+    """Release adapter resources (shared HTTP clients) on worker shutdown."""
+    for adapter in _registry.values():
+        await adapter.aclose()
+    _registry.clear()

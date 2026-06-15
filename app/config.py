@@ -82,10 +82,32 @@ class Settings(BaseSettings):
     list_max_limit: int = 200
 
     # --- Channel adapters (04) ---
+    # Per-channel timeout/retry/backoff are channel constants (see
+    # app/channels/policy.py, 04 §5). These remain as conservative fallbacks /
+    # circuit-breaker tunables shared across channels.
     channel_timeout_seconds: float = 5.0
     channel_max_retries: int = 3
     circuit_failure_threshold: int = 5
     circuit_reset_seconds: int = 30
+    # Provider credentials (04 §9): resolved from a secrets backend at runtime.
+    # "env" reads ANS_SECRET_<NAME> (local/dev); "aws" reads AWS Secrets Manager.
+    secrets_backend: str = "env"
+    aws_secrets_prefix: str = "ans/"
+    # Email via SES SMTP (04 §9). STARTTLS is required; a downgrade is rejected.
+    # Credentials (user/password) come from the secrets backend, not these vars.
+    smtp_host: str = "email-smtp.us-east-1.amazonaws.com"
+    smtp_port: int = 587
+    smtp_from: str = "alerts@example.com"
+    smtp_user_secret: str = "ses_smtp_user"
+    smtp_password_secret: str = "ses_smtp_password"
+    # Webhook HMAC signing (04 §9): sign the body so receivers can verify it.
+    webhook_signing_enabled: bool = True
+    # Slack bot token secret name (resolved via the secrets backend).
+    slack_token_secret: str = "slack_bot_token"
+    # Twilio (SMS) credential secret names + sender id.
+    twilio_sid_secret: str = "twilio_account_sid"
+    twilio_token_secret: str = "twilio_auth_token"
+    twilio_from_number: str = ""
 
     # --- Auth (08) ---
     api_keys: list[str] = Field(default_factory=list)

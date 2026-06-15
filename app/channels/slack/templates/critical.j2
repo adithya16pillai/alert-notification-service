@@ -1,0 +1,5 @@
+{% block subject %}{{ alert.title | default('alert') }}{% endblock %}
+{% block body %}:rotating_light: *[CRITICAL]* {{ alert.title | default('alert') }}
+{{ alert.body | default('') }}
+*host:* {{ alert.labels.host | default('unknown') }}  _source:_ {{ alert.source | default('unknown') }}  _topic:_ {{ alert.topic | default('-') }}
+{% endblock %}

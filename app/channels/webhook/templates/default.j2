@@ -1,0 +1,4 @@
+{# Webhook delivers a JSON envelope built by the adapter; this template only
+   supplies a human-readable summary string the adapter embeds as `summary`. #}
+{% block subject %}{{ alert.title | default('alert') }}{% endblock %}
+{% block body %}[{{ alert.severity | upper }}] {{ alert.title | default('alert') }} — {{ alert.source | default('unknown') }}{% endblock %}
