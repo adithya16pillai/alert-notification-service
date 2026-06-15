@@ -17,17 +17,22 @@ import json
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
 from app.config import get_settings
 from app.errors import BackpressureShed, IdempotencyConflict
+from app.ingestion.dedup import evaluate as evaluate_dedup
 from app.ingestion.models import Alert
 from app.ingestion.schemas import AlertIn, Severity
 from app.observability import get_logger
-from app.observability.metrics import alerts_ingested_total, backpressure_shed_total
+from app.observability.metrics import (
+    alerts_deduped_total,
+    alerts_ingested_total,
+    backpressure_shed_total,
+)
 from app.queue.priority_queue import enqueue_alert, queue_depth_for
 from app.redis_client import get_redis
 
@@ -38,6 +43,7 @@ log = get_logger(__name__)
 class IngestResult:
     alert_id: str
     replay: bool  # True => idempotent replay (HTTP 200), False => new (HTTP 202)
+    deduped: bool = False  # True => recorded as a content duplicate, not dispatched
 
 
 def _fingerprint(a: AlertIn) -> str:
@@ -126,6 +132,13 @@ async def ingest_alert(
         existing_id = await redis.get(redis_key)
         new_id = existing_id or new_id
 
+    # --- Layer 3: content dedup (06). After idempotency confirms this is a
+    # genuinely new request, decide whether it's the first occurrence of its
+    # event or a duplicate within the window. A duplicate is still recorded
+    # (status='deduped', dedup_of=original) but never dispatched (06 §4, §6). ---
+    dedup = await evaluate_dedup(alert_in, new_id)
+    is_duplicate = dedup.decision == "duplicate"
+
     # --- Durable write (before the 202 — no fire-and-pray) ---
     alert = Alert(
         id=new_id,
@@ -138,8 +151,10 @@ async def ingest_alert(
         labels=alert_in.labels,
         payload=alert_in.payload,
         occurred_at=alert_in.occurred_at,
-        status="accepted",
+        status="deduped" if is_duplicate else "accepted",
         idempotency_key=idempotency_key,
+        dedup_of=dedup.original_id,
+        fingerprint_version=dedup.fingerprint_version,
     )
     session.add(alert)
     try:
@@ -156,6 +171,24 @@ async def ingest_alert(
                 field="Idempotency-Key",
             ) from None
         return IngestResult(alert_id=existing.id, replay=True)
+
+    # --- Duplicate: bump the original's count, never enqueue (06 §6) ---
+    if is_duplicate:
+        if dedup.original_id is not None:
+            await session.execute(
+                update(Alert)
+                .where(Alert.id == dedup.original_id)
+                .values(dedup_count=Alert.dedup_count + 1)
+            )
+            await session.commit()
+        alerts_deduped_total.labels(severity=alert_in.severity.value).inc()
+        log.info(
+            "ingest.deduped",
+            alert_id=alert.id,
+            dedup_of=dedup.original_id,
+            severity=alert_in.severity.value,
+        )
+        return IngestResult(alert_id=alert.id, replay=False, deduped=True)
 
     # --- Enqueue (write-ahead-log: notification after durability) ---
     # The row is already durable, so we honour the 2xx contract even if enqueue

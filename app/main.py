@@ -20,6 +20,7 @@ from app.channels import register_defaults
 from app.config import get_settings
 from app.db import dispose_engine
 from app.errors import AppError, ValidationError
+from app.ingestion import dedup_router
 from app.ingestion import router as ingestion_router
 from app.observability import configure_logging, configure_tracing, get_logger, metrics_router
 from app.recipients import router as recipients_router
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     app.include_router(ingestion_router)
+    app.include_router(dedup_router)
     app.include_router(recipients_router)
     app.include_router(subscriptions_router)
     app.include_router(audit_router)

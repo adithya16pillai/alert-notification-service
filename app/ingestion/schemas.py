@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -58,7 +59,31 @@ class AlertIn(BaseModel):
 
 
 class AlertAccepted(BaseModel):
-    """202 (new) / 200 (idempotent replay) response body (01 §5)."""
+    """202 (new / deduped) / 200 (idempotent replay) response body (01 §5, 06 §4)."""
 
     alert_id: str
-    status: str = "accepted"
+    status: str = "accepted"  # accepted | deduped
+
+
+# --- Dedup policy config API (06 §2) ---
+class DedupPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topic: str | None = Field(default=None, max_length=256)  # None = tenant default
+    dedup_fields: list[str] = Field(default_factory=lambda: ["host", "region"], max_length=50)
+    window_seconds: int = Field(ge=1, le=86_400)
+    critical_bypass: bool = False
+    enabled: bool = True
+
+
+class DedupPolicyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: str
+    topic: str | None
+    dedup_fields: list[str]
+    window_seconds: int
+    critical_bypass: bool
+    enabled: bool
+    created_at: datetime

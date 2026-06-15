@@ -34,8 +34,22 @@ class Settings(BaseSettings):
     ingest_max_body_bytes: int = 256 * 1024  # hard cap; larger => 413 (01 §7)
     idempotency_ttl_seconds: int = 24 * 60 * 60  # 24h idempotency window
 
-    # --- Dedup / rate limit (02) ---
-    dedup_window_seconds: int = 300
+    # --- Content dedup (06) ---
+    # Two alerts about the same event within the window collapse to one dispatch.
+    # All three are overridable per (tenant, topic) via the dedup_policies table.
+    dedup_window_seconds: int = 300  # default dedup window (5 min)
+    dedup_default_fields: list[str] = Field(default_factory=lambda: ["host", "region"])
+    # §4 vs §7 of the PRD disagree on the default; we follow §4's explicit
+    # reasoning — duplicate *critical* pages cause the most harm, so we dedupe
+    # critical by default (bypass OFF). Tenants who want "page me every time"
+    # set critical_bypass=True on their policy.
+    dedup_critical_bypass: bool = False
+    dedup_key_prefix: str = "dedup"
+    dedup_fingerprint_version: int = 1  # bump when compute_fingerprint changes
+    dedup_policy_cache_key_prefix: str = "dedup:policy:tenant"
+    dedup_policy_cache_ttl_seconds: int = 60
+
+    # --- Rate limit (02) ---
     rate_limit_capacity: int = 20  # token-bucket size per recipient+channel
     rate_limit_refill_per_sec: float = 1.0
 

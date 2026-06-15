@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_api_key
+from app.auth import require_api_key, require_tenant
 from app.auth.dependencies import Principal
 from app.config import get_settings
 from app.db import get_session
 from app.errors import PayloadTooLargeError
-from app.ingestion.schemas import AlertAccepted, AlertIn
+from app.ingestion import dedup
+from app.ingestion.schemas import AlertAccepted, AlertIn, DedupPolicyIn, DedupPolicyOut
 from app.ingestion.service import ingest_alert
 
 router = APIRouter(prefix="/v1/alerts", tags=["ingestion"])
+dedup_router = APIRouter(prefix="/v1/dedup-policies", tags=["dedup"])
 
 
 async def enforce_body_limit(request: Request) -> None:
@@ -49,4 +53,40 @@ async def post_alert(
     result = await ingest_alert(session, alert, idempotency_key)
     if result.replay:
         response.status_code = status.HTTP_200_OK
-    return AlertAccepted(alert_id=result.alert_id)
+    # A deduped alert is still accepted (202) and recorded — the recipient just
+    # won't be paged again (06 §4). The status tells the producer what happened.
+    return AlertAccepted(
+        alert_id=result.alert_id, status="deduped" if result.deduped else "accepted"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Dedup policy config API (06 §2)
+# --------------------------------------------------------------------------- #
+@dedup_router.get("", response_model=list[DedupPolicyOut])
+async def list_dedup_policies(
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[DedupPolicyOut]:
+    rows = await dedup.list_dedup_policies(session, tenant=tenant)
+    return [DedupPolicyOut.model_validate(r) for r in rows]
+
+
+@dedup_router.put("", response_model=DedupPolicyOut)
+async def upsert_dedup_policy(
+    body: DedupPolicyIn,
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> DedupPolicyOut:
+    policy = await dedup.upsert_dedup_policy(session, tenant=tenant, body=body)
+    return DedupPolicyOut.model_validate(policy)
+
+
+@dedup_router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_dedup_policy(
+    policy_id: UUID,
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    await dedup.delete_dedup_policy(session, tenant=tenant, policy_id=policy_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -18,6 +18,12 @@ http_request_latency = Histogram(
 
 # --- Product-specific ---
 alerts_ingested_total = Counter("ans_alerts_ingested_total", "Alerts accepted", ["severity"])
+# Content dedup (06): suppressed duplicates. Per-tenant dedup rate is derived
+# from the alerts table (status='deduped'); severity keeps the label cardinality
+# bounded here.
+alerts_deduped_total = Counter(
+    "ans_alerts_deduped_total", "Alerts suppressed as content duplicates", ["severity"]
+)
 queue_depth = Gauge("ans_queue_depth", "Items in priority queue", ["severity"])
 dlq_depth = Gauge("ans_dlq_depth", "Items in dead-letter queue")
 # Priority queue (02): critical time-to-dispatch + in-flight/visibility health.
