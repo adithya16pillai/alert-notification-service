@@ -22,6 +22,8 @@ from app.recipients.schemas import (
     ChannelIn,
     ChannelOut,
     Page,
+    RateLimitPolicyIn,
+    RateLimitPolicyOut,
     RecipientIn,
     RecipientOut,
     RecipientPatch,
@@ -32,6 +34,7 @@ from app.recipients.schemas import (
 
 router = APIRouter(prefix="/v1/recipients", tags=["recipients"])
 subscriptions_router = APIRouter(prefix="/v1/subscriptions", tags=["subscriptions"])
+rate_limit_router = APIRouter(prefix="/v1/rate-limit-policies", tags=["rate-limit"])
 
 
 # --------------------------------------------------------------------------- #
@@ -198,4 +201,36 @@ async def delete_subscription(
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     await service.delete_subscription(session, tenant=tenant, subscription_id=subscription_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --------------------------------------------------------------------------- #
+# Rate-limit policies (05 §2 config API)
+# --------------------------------------------------------------------------- #
+@rate_limit_router.get("", response_model=list[RateLimitPolicyOut])
+async def list_policies(
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[RateLimitPolicyOut]:
+    rows = await service.list_rate_limit_policies(session, tenant=tenant)
+    return [RateLimitPolicyOut.model_validate(r) for r in rows]
+
+
+@rate_limit_router.put("", response_model=RateLimitPolicyOut)
+async def upsert_policy(
+    body: RateLimitPolicyIn,
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> RateLimitPolicyOut:
+    policy = await service.upsert_rate_limit_policy(session, tenant=tenant, body=body)
+    return RateLimitPolicyOut.model_validate(policy)
+
+
+@rate_limit_router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_policy(
+    policy_id: UUID,
+    tenant: str = Depends(require_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    await service.delete_rate_limit_policy(session, tenant=tenant, policy_id=policy_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

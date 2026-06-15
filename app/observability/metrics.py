@@ -52,6 +52,19 @@ subscription_cache_invalidations_total = Counter(
 rate_limit_denials_total = Counter(
     "ans_rate_limit_denials_total", "Deliveries denied by rate limit", ["channel"]
 )
+# Deferral-instead-of-drop accounting (05 §7). Recipient is deliberately NOT a
+# label (unbounded cardinality); per-recipient denial alerting is done off logs.
+rate_limit_deferred_total = Counter(
+    "ans_rate_limit_deferred_total", "Deliveries deferred (parked for retry)", ["channel"]
+)
+rate_limit_abandoned_total = Counter(
+    "ans_rate_limit_abandoned_total",
+    "Deliveries abandoned to DLQ after exceeding the deferral cap",
+    ["channel"],
+)
+retry_queue_depth = Gauge(
+    "ans_retry_queue_depth", "Items parked in the deferred-retry queue", ["severity"]
+)
 delivery_attempts_total = Counter(
     "ans_delivery_attempts_total", "Delivery attempts", ["channel", "status"]
 )

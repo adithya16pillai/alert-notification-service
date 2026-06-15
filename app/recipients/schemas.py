@@ -95,6 +95,31 @@ class SubscriptionOut(BaseModel):
     created_at: datetime
 
 
+# --- Rate-limit policies (05 §7) ---
+class RateLimitPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # NULL recipient_id / channel_kind = "applies to all" at that level.
+    recipient_id: UUID | None = None
+    channel_kind: str | None = Field(default=None, pattern=_KIND)
+    capacity: int = Field(ge=1, le=100_000)
+    refill_per_sec: float = Field(gt=0)
+    critical_bypass: bool = True
+
+
+class RateLimitPolicyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: str
+    recipient_id: UUID | None
+    channel_kind: str | None
+    capacity: int
+    refill_per_sec: float
+    critical_bypass: bool
+    created_at: datetime
+
+
 # --- Cursor envelope (03 §6) ---
 class Page[T](BaseModel):
     items: list[T]

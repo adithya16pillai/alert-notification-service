@@ -23,8 +23,8 @@ from app.errors import AppError, ValidationError
 from app.ingestion import dedup_router
 from app.ingestion import router as ingestion_router
 from app.observability import configure_logging, configure_tracing, get_logger, metrics_router
+from app.recipients import rate_limit_router, subscriptions_router
 from app.recipients import router as recipients_router
-from app.recipients import subscriptions_router
 from app.redis_client import close_redis
 
 log = get_logger(__name__)
@@ -80,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(dedup_router)
     app.include_router(recipients_router)
     app.include_router(subscriptions_router)
+    app.include_router(rate_limit_router)
     app.include_router(audit_router)
     if settings.metrics_enabled:
         app.include_router(metrics_router)

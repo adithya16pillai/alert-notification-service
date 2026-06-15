@@ -49,9 +49,23 @@ class Settings(BaseSettings):
     dedup_policy_cache_key_prefix: str = "dedup:policy:tenant"
     dedup_policy_cache_ttl_seconds: int = 60
 
-    # --- Rate limit (02) ---
-    rate_limit_capacity: int = 20  # token-bucket size per recipient+channel
+    # --- Rate limit (02 / 05) ---
+    # Default token-bucket policy (05 §3): 10 tokens, refill 1/s. Overridable
+    # per (tenant, recipient, channel) via the rate_limit_policies table.
+    rate_limit_capacity: int = 10  # token-bucket size per recipient+channel
     rate_limit_refill_per_sec: float = 1.0
+    # Critical alerts bypass the limiter by default (05 §3); per-tenant override
+    # lives in the policy table's `critical_bypass` column.
+    rate_limit_critical_bypass: bool = True
+    # Deferral instead of drop (05 §7): a rate-limited delivery is parked in the
+    # retry ZSET and retried after this delay, abandoned to DLQ past the cap.
+    rate_limit_retry_delay_ms: int = 1000
+    rate_limit_max_defer_seconds: int = 60
+    retry_queue_key_prefix: str = "queue:retry"
+    # Per-tenant policy cache. TTL bounds cross-worker staleness after a policy
+    # edit (no pub/sub — a slower-moving config than subscriptions, 05 §7).
+    rate_limit_policy_cache_key_prefix: str = "rl:policy:tenant"
+    rate_limit_policy_cache_ttl_seconds: int = 60
 
     # --- Queue / dispatcher (02 / 05) ---
     queue_key_prefix: str = "queue:alerts"

@@ -22,18 +22,32 @@ def _bucket_key(recipient_id: str, channel: str) -> str:
     return f"rl:{{{recipient_id}}}:{channel}"
 
 
-async def allow(recipient_id: str, channel: str, *, cost: int = 1) -> tuple[bool, float]:
-    """Return ``(allowed, remaining_tokens)`` for one delivery attempt."""
+async def allow(
+    recipient_id: str,
+    channel: str,
+    *,
+    cost: int = 1,
+    capacity: int | None = None,
+    refill_per_sec: float | None = None,
+) -> tuple[bool, float]:
+    """Return ``(allowed, remaining_tokens)`` for one delivery attempt.
+
+    ``capacity`` / ``refill_per_sec`` override the global defaults, letting the
+    dispatcher pass a resolved per-(recipient, channel) policy (05 §3, §7). The
+    Lua script stays generic — the override is just two different ARGV values.
+    """
     global _bucket_script
     redis = get_redis()
     if _bucket_script is None:
+        # register_script uses EVALSHA and transparently falls back to EVAL on
+        # NOSCRIPT (Redis restart / cache flush), re-caching the body (05 §6).
         _bucket_script = redis.register_script(load_lua("token_bucket"))
     settings = get_settings()
     allowed, remaining = await _bucket_script(
         keys=[_bucket_key(recipient_id, channel)],
         args=[
-            settings.rate_limit_capacity,
-            settings.rate_limit_refill_per_sec,
+            settings.rate_limit_capacity if capacity is None else capacity,
+            settings.rate_limit_refill_per_sec if refill_per_sec is None else refill_per_sec,
             time.time(),
             cost,
         ],

@@ -17,8 +17,10 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     func,
 )
@@ -125,3 +127,50 @@ class Subscription(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     recipient: Mapped[Recipient] = relationship(back_populates="subscriptions")
+
+
+class RateLimitPolicy(Base):
+    """Per-scope token-bucket override (05 §7).
+
+    Scope is the tuple ``(tenant_id, recipient_id, channel_kind)`` where a NULL
+    ``recipient_id`` or ``channel_kind`` means "applies to all" — so a tenant can
+    set a default, override it per channel, and override that again per recipient.
+    The most specific live row wins (resolved in ``rate_limit_policy.py``).
+    """
+
+    __tablename__ = "rate_limit_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "channel_kind IS NULL OR channel_kind IN ('email','slack','webhook','sms')",
+            name="ck_rlp_channel_kind",
+        ),
+        CheckConstraint("capacity >= 1", name="ck_rlp_capacity"),
+        CheckConstraint("refill_per_sec > 0", name="ck_rlp_refill"),
+        # One live policy per scope. NULLs-not-distinct (PG15+) makes the tenant
+        # default (both NULL) genuinely unique — the classic NULL-uniqueness trap.
+        Index(
+            "uq_rlp_scope",
+            "tenant_id",
+            "recipient_id",
+            "channel_kind",
+            unique=True,
+            postgresql_where="deleted_at IS NULL",
+            postgresql_nulls_not_distinct=True,
+        ),
+        {"schema": "recipients"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    recipient_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )  # NULL = tenant-wide
+    # NULL channel_kind = applies to all channels.
+    channel_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    capacity: Mapped[int] = mapped_column(Integer)
+    refill_per_sec: Mapped[float] = mapped_column(Float)
+    critical_bypass: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

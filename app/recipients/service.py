@@ -29,10 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import NotFoundError, ValidationError
 from app.recipients.cache import get_snapshot, invalidate
 from app.recipients.matching import collect_targets
-from app.recipients.models import Channel, Recipient, Subscription
+from app.recipients.models import Channel, RateLimitPolicy, Recipient, Subscription
 from app.recipients.pagination import decode_cursor, encode_cursor
+from app.recipients.rate_limit_policy import invalidate_policies
 from app.recipients.schemas import (
     ChannelIn,
+    RateLimitPolicyIn,
     RecipientPatch,
     ResolvedTarget,
     SubscriptionIn,
@@ -317,3 +319,76 @@ async def resolve_targets(
     """
     snapshot = await get_snapshot(session, tenant)
     return collect_targets(snapshot, topic=topic, severity=severity)
+
+
+# --------------------------------------------------------------------------- #
+# Rate-limit policies (05 §7)
+# --------------------------------------------------------------------------- #
+async def list_rate_limit_policies(
+    session: AsyncSession, *, tenant: str
+) -> list[RateLimitPolicy]:
+    """All live policies for a tenant (small set — no pagination needed)."""
+    stmt = (
+        select(RateLimitPolicy)
+        .where(RateLimitPolicy.tenant_id == tenant, RateLimitPolicy.deleted_at.is_(None))
+        .order_by(RateLimitPolicy.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def upsert_rate_limit_policy(
+    session: AsyncSession, *, tenant: str, body: RateLimitPolicyIn
+) -> RateLimitPolicy:
+    """Create or replace the policy for a scope. The scope key is
+    ``(tenant, recipient_id, channel_kind)``; an existing live row for the same
+    scope is updated in place so there's exactly one policy per scope."""
+    existing = (
+        await session.execute(
+            select(RateLimitPolicy).where(
+                RateLimitPolicy.tenant_id == tenant,
+                RateLimitPolicy.recipient_id == body.recipient_id,
+                RateLimitPolicy.channel_kind == body.channel_kind,
+                RateLimitPolicy.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        existing.capacity = body.capacity
+        existing.refill_per_sec = body.refill_per_sec
+        existing.critical_bypass = body.critical_bypass
+        policy = existing
+    else:
+        policy = RateLimitPolicy(
+            tenant_id=tenant,
+            recipient_id=body.recipient_id,
+            channel_kind=body.channel_kind,
+            capacity=body.capacity,
+            refill_per_sec=body.refill_per_sec,
+            critical_bypass=body.critical_bypass,
+        )
+        session.add(policy)
+
+    await session.commit()
+    await session.refresh(policy)
+    await invalidate_policies(tenant)
+    return policy
+
+
+async def delete_rate_limit_policy(
+    session: AsyncSession, *, tenant: str, policy_id: UUID
+) -> None:
+    policy = (
+        await session.execute(
+            select(RateLimitPolicy).where(
+                RateLimitPolicy.id == policy_id,
+                RateLimitPolicy.tenant_id == tenant,
+                RateLimitPolicy.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if policy is None:
+        raise NotFoundError(f"rate-limit policy {policy_id} not found")
+    policy.deleted_at = datetime.now(UTC)
+    await session.commit()
+    await invalidate_policies(tenant)
