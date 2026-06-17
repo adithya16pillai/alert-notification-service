@@ -22,6 +22,11 @@ from app.channels.email.adapter import EmailChannel, SmtpDowngradeError
 from app.channels.slack.adapter import SlackChannel
 from app.channels.sms.adapter import SmsChannel
 from app.channels.webhook.adapter import WebhookChannel
+from app.config import get_settings
+
+# Every send() consults the per-provider Redis circuit breaker (07 §4), so the
+# whole suite needs the in-memory Redis.
+pytestmark = pytest.mark.usefixtures("fake_redis")
 
 
 def make_req(*, target: str = "https://example.test/hook", config=None) -> DeliveryRequest:
@@ -235,9 +240,9 @@ async def test_email_timeout_is_transient(email_creds, monkeypatch):
 async def test_circuit_breakers_are_independent():
     slack = SlackChannel()
     email = EmailChannel()
-    # Trip Slack's breaker directly.
-    for _ in range(slack._breaker._threshold):
-        slack._breaker.record(ok=False)
-    # Slack is open, email is untouched.
+    # Trip Slack's provider breaker directly (state lives in Redis, 07 §4.3).
+    for _ in range(get_settings().circuit_failure_threshold):
+        await slack._breaker.record("slack", ok=False)
+    # Slack is open, email is untouched — per-provider isolation (07 §4.2).
     assert await slack.health_check() is False
     assert await email.health_check() is True

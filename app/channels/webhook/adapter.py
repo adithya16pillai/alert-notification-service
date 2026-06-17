@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,6 +29,12 @@ log = get_logger(__name__)
 
 class WebhookChannel(HttpChannel):
     name = "webhook"
+
+    def provider_key(self, req: DeliveryRequest) -> str:
+        """Per-receiver breaker (07 §4.2): a down receiver opens only its own
+        circuit, keyed by host, so other webhook destinations keep delivering."""
+        host = urlsplit(req.target).netloc or "unknown"
+        return f"webhook:{host}"
 
     def _signing_secret(self, req: DeliveryRequest) -> str | None:
         # Per-recipient secret: prefer the channel config, fall back to the

@@ -51,3 +51,17 @@ def test_jitter_extremes():
     high.random = lambda: 1.0  # type: ignore[method-assign]
     assert backoff_delay(p, 0, rng=low) == 4.0 * (1 - JITTER_RATIO)
     assert backoff_delay(p, 0, rng=high) == 4.0 * (1 + JITTER_RATIO)
+
+
+def test_jitter_spreads_concurrent_retries():
+    # 07 §6: 100 clients retrying the same attempt must not land on one instant.
+    # Jitter spreads them across a band, so the recovering provider isn't hit by a
+    # synchronized herd (07 §3.2). Compare to the herd a no-jitter backoff produces.
+    p = ChannelPolicy(timeout_s=5, max_retries=5, backoff_base_s=4.0, backoff_cap_s=300.0)
+    rng = random.Random(42)
+    delays = [backoff_delay(p, 2, rng=rng) for _ in range(100)]
+    assert len(set(delays)) > 90  # near-all distinct => no lockstep
+    raw = min(4.0 * (2**2), 300.0)
+    # The jitter band spans raw·2·JITTER_RATIO (= 0.5·raw here); 100 samples should
+    # fill most of it rather than clustering on one instant.
+    assert max(delays) - min(delays) > 0.3 * raw

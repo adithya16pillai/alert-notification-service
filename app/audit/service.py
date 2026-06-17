@@ -1,7 +1,8 @@
-"""Delivery-attempt persistence + DLQ push.
+"""Delivery-attempt persistence (the durable audit trail).
 
-The DLQ is a Redis stream (00 §7.4 step 10) so failed jobs survive worker
-restarts and can be inspected / replayed by an operator.
+One row per (alert × recipient × channel) attempt — the "no alert silently lost"
+evidence (00 §2). Terminal failures additionally land in the DLQ stream, which is
+owned by :mod:`app.dlq` (07 §5).
 """
 
 from __future__ import annotations
@@ -12,10 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.models import DeliveryAttempt
-from app.observability.metrics import dlq_depth
-from app.redis_client import get_redis
-
-DLQ_STREAM = "dlq:delivery"
 
 
 async def record_attempt(
@@ -51,17 +48,3 @@ async def list_attempts(session: AsyncSession, alert_id: str) -> list[DeliveryAt
         .order_by(DeliveryAttempt.created_at)
     )
     return list((await session.execute(stmt)).scalars().all())
-
-
-async def push_to_dlq(alert_id: str, recipient_id: UUID, channel: str, error: str) -> None:
-    redis = get_redis()
-    await redis.xadd(
-        DLQ_STREAM,
-        {
-            "alert_id": alert_id,
-            "recipient_id": str(recipient_id),
-            "channel": channel,
-            "error": error,
-        },
-    )
-    dlq_depth.set(await redis.xlen(DLQ_STREAM))

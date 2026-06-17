@@ -5,12 +5,17 @@ Loop:
   2. For each alert: load it, resolve (recipient × channel) targets, mark it
      ``dispatched`` so the janitor won't re-enqueue a healthy alert.
   3. Apply per-recipient+channel token-bucket rate limit.
-  4. For each passing target: call the channel adapter with retry, record the
-     attempt, DLQ on terminal failure.
+  4. For each passing target: make ONE guarded delivery attempt, record it, and
+     decide the next step (07 §3.3) — success is done; a transient failure is
+     rescheduled onto the retry queue with backoff+jitter (the worker never
+     blocks sleeping); a permanent failure or exhausted retries is abandoned to
+     the DLQ. A rate-limited target is parked on the same retry queue (05 §7).
 
-Periodically runs the ingestion janitor to recover alerts that were durably
-accepted but never enqueued (01 §8). Run N of these as separate processes
-(stateless; state is in Postgres/Redis).
+Each loop also drains due retries/deferrals off ``queue:retry:{severity}`` and
+feeds them back through the same attempt path, so one queue serves both reasons
+(07 §7). Periodically runs the ingestion janitor to recover alerts that were
+durably accepted but never enqueued (01 §8). Run N of these as separate
+processes (stateless; state is in Postgres/Redis).
 """
 
 from __future__ import annotations
@@ -20,14 +25,14 @@ import time
 
 from sqlalchemy import select
 
-from app.audit.service import push_to_dlq, record_attempt
+from app.audit.service import record_attempt
 from app.channels import DeliveryRequest, close_all, get_channel, register_defaults
 from app.channels.policy import backoff_delay
 from app.channels.rendering import get_renderer
 from app.channels.secrets import install_sighup_reload
 from app.config import get_settings
 from app.db import get_sessionmaker
-from app.errors import CircuitOpenError
+from app.dlq import service as dlq
 from app.ingestion.janitor import GRACE_SECONDS, requeue_stale_accepted
 from app.ingestion.models import Alert
 from app.ingestion.schemas import Severity
@@ -108,26 +113,40 @@ class Dispatcher:
         return len(due)
 
     async def _process_deferred(self, delivery: DeferredDelivery) -> None:
-        """Retry one parked delivery: abandon if past the cap, else re-check the
-        limit and either send or re-park (05 §7, §8)."""
-        target = ResolvedTarget(
+        """Drain one parked delivery. Both reasons ride this one queue (07 §7);
+        the reason picks the handler."""
+        if delivery.reason == "retry":
+            await self._process_retry(delivery)
+        else:
+            await self._process_rate_limited(delivery)
+
+    def _target_of(self, delivery: DeferredDelivery) -> ResolvedTarget:
+        return ResolvedTarget(
             recipient_id=delivery.recipient_id,
             channel=delivery.channel,
             target=delivery.target,
             config=delivery.config or {},
         )
+
+    async def _process_rate_limited(self, delivery: DeferredDelivery) -> None:
+        """A rate-limit-deferred delivery: abandon if past the cap, else re-check
+        the limit and either start delivery or re-park (05 §7, §8)."""
+        target = self._target_of(delivery)
         cap_ms = self.settings.rate_limit_max_defer_seconds * 1000
         if now_ms() - delivery.first_deferred_ms >= cap_ms:
-            # Total deferral exceeded the cap: abandon to the DLQ (05 §8).
+            # Total deferral exceeded the cap: abandon to the DLQ (05 §8, 07 §5.1).
             await self._record(
                 "abandoned", delivery.alert_id, target, 0, None, "rate_limit_deferral_expired"
             )
             rate_limit_abandoned_total.labels(channel=delivery.channel).inc()
-            await push_to_dlq(
+            await self._abandon(
                 delivery.alert_id,
-                target.recipient_id,
-                delivery.channel,
-                "rate_limit_deferral_expired",
+                target,
+                severity=delivery.severity,
+                tenant=delivery.tenant,
+                reason="rate_limit_expired",
+                error="rate_limit_deferral_expired",
+                history=list(delivery.attempt_history),
             )
             log.info("dispatcher.deferral_abandoned", alert_id=delivery.alert_id)
             return
@@ -140,7 +159,22 @@ class Dispatcher:
         if snapshot is None:
             log.warning("dispatcher.deferred_alert_missing", alert_id=delivery.alert_id)
             return
-        await self._deliver(snapshot, target)
+        # The limit cleared: begin the delivery attempt sequence afresh.
+        await self._attempt(snapshot, target, attempt_no=0, history=[])
+
+    async def _process_retry(self, delivery: DeferredDelivery) -> None:
+        """A transient-failure retry whose backoff has elapsed (07 §3.3): pick up
+        where the attempt count left off."""
+        snapshot = await self._load_snapshot(delivery.alert_id)
+        if snapshot is None:
+            log.warning("dispatcher.retry_alert_missing", alert_id=delivery.alert_id)
+            return
+        await self._attempt(
+            snapshot,
+            self._target_of(delivery),
+            attempt_no=delivery.attempt_no,
+            history=list(delivery.attempt_history),
+        )
 
     async def _load_snapshot(self, alert_id: str) -> _AlertSnapshot | None:
         async with get_sessionmaker()() as session:
@@ -182,7 +216,7 @@ class Dispatcher:
 
         for target in targets:
             if await self._rate_limit_allows(snapshot.tenant, snapshot.severity, target):
-                await self._deliver(snapshot, target)
+                await self._attempt(snapshot, target, attempt_no=0, history=[])
             else:
                 # Don't drop — park for retry. A silent drop is the worst outcome
                 # (the customer never sees the alert); defer up to the cap (05 §7).
@@ -233,8 +267,7 @@ class Dispatcher:
             channel=delivery.channel,
         )
 
-    async def _deliver(self, alert: _AlertSnapshot, target: ResolvedTarget) -> None:
-        channel = get_channel(target.channel)
+    def _build_request(self, alert: _AlertSnapshot, target: ResolvedTarget) -> DeliveryRequest:
         severity = Severity(alert.severity).value
         # Render the (channel × severity) template; missing fields degrade to
         # safe defaults — a render failure never loses the alert (04 §8).
@@ -253,7 +286,7 @@ class Dispatcher:
                 "labels": alert.labels,
             },
         )
-        req = DeliveryRequest(
+        return DeliveryRequest(
             alert_id=alert.id,
             recipient_id=target.recipient_id,
             target=target.target,
@@ -266,45 +299,132 @@ class Dispatcher:
             rendered_body=body,
         )
 
-        # Retries, backoff, and budget come from the per-channel policy (04 §5),
-        # so Slack's tight retry budget never inherits email's, and vice versa.
-        policy = channel.policy
-        last_error = "unknown"
-        for attempt_no in range(policy.max_retries):
-            try:
-                result = await channel.send(req)
-            except CircuitOpenError:
-                # Provider is degraded; immediate retry is pointless. DLQ for
-                # later replay so other channels keep flowing (04 §9 isolation).
-                last_error = "circuit_open"
-                delivery_errors_total.labels(
-                    channel=target.channel, classification="circuit_open"
-                ).inc()
-                break
+    async def _attempt(
+        self,
+        alert: _AlertSnapshot,
+        target: ResolvedTarget,
+        *,
+        attempt_no: int,
+        history: list[dict],
+    ) -> None:
+        """Make exactly ONE delivery attempt, record it, and decide the next step
+        (07 §3.3): success → done; transient → reschedule with backoff onto the
+        retry queue (the worker is never blocked sleeping); permanent or
+        retries-exhausted → abandon to the DLQ. ``attempt_no`` is the count of
+        attempts already made, so this attempt is number ``attempt_no + 1`` and a
+        consistently-failing channel produces exactly ``max_retries + 1`` rows and
+        one DLQ entry (07 §6)."""
+        channel = get_channel(target.channel)
+        policy = channel.policy  # per-channel budget/backoff (04 §5)
+        n = attempt_no + 1
+        result = await channel.send(self._build_request(alert, target))
 
-            if result.ok:
-                await self._record("sent", alert.id, target, attempt_no, result.provider_id, None)
-                delivery_attempts_total.labels(channel=target.channel, status="sent").inc()
-                return
+        if result.ok:
+            await self._record("sent", alert.id, target, n, result.provider_id, None)
+            delivery_attempts_total.labels(channel=target.channel, status="sent").inc()
+            return
 
-            last_error = result.error or "delivery failed"
-            delivery_errors_total.labels(
-                channel=target.channel, classification=result.status.value
-            ).inc()
-            if not result.retryable:
-                break  # permanent failure -> abandon to DLQ immediately (04 §6)
-            if attempt_no + 1 < policy.max_retries:
-                # Honour a provider's Retry-After over our computed backoff (04 §9).
-                delay = (
-                    result.retry_after_s
-                    if result.retry_after_s is not None
-                    else backoff_delay(policy, attempt_no)
-                )
-                await asyncio.sleep(delay)
+        delivery_errors_total.labels(
+            channel=target.channel, classification=result.status.value
+        ).inc()
+        error = result.error or "delivery failed"
+        history = [*history, {"attempt": n, "status": result.status.value, "error": error}]
 
-        await self._record("dlq", alert.id, target, policy.max_retries, None, last_error)
-        delivery_attempts_total.labels(channel=target.channel, status="failed").inc()
-        await push_to_dlq(alert.id, target.recipient_id, target.channel, last_error)
+        is_permanent = not result.retryable  # 4xx / bad address / auth (04 §6)
+        exhausted = n > policy.max_retries
+        if is_permanent or exhausted:
+            # This failed attempt is the terminal row (status 'abandoned'); no
+            # extra row is written, so the count stays at max_retries + 1.
+            await self._record("abandoned", alert.id, target, n, None, error)
+            delivery_attempts_total.labels(channel=target.channel, status="failed").inc()
+            await self._abandon(
+                alert.id,
+                target,
+                severity=alert.severity,
+                tenant=alert.tenant,
+                reason="permanent_failure" if is_permanent else "exhausted_retries",
+                error=error,
+                history=history,
+            )
+            return
+
+        # Transient and budget remains: record the failed attempt and reschedule
+        # with exponential backoff + jitter. Honour a provider's Retry-After over
+        # our computed delay when present (04 §9).
+        await self._record("failed", alert.id, target, n, None, error)
+        delay = (
+            result.retry_after_s
+            if result.retry_after_s is not None
+            else backoff_delay(policy, n - 1)
+        )
+        await self._reschedule(
+            alert, target, attempt_no=n, last_error=error, history=history, delay_s=delay
+        )
+
+    async def _reschedule(
+        self,
+        alert: _AlertSnapshot,
+        target: ResolvedTarget,
+        *,
+        attempt_no: int,
+        last_error: str,
+        history: list[dict],
+        delay_s: float,
+    ) -> None:
+        """Park a transient failure back on the retry queue, due after ``delay_s``
+        (07 §3.3). Jitter in the delay spreads concurrent retries so a recovering
+        provider isn't hit by a synchronized herd (07 §3.2)."""
+        await defer(
+            DeferredDelivery(
+                alert_id=alert.id,
+                tenant=alert.tenant,
+                recipient_id=str(target.recipient_id),
+                channel=target.channel,
+                target=target.target,
+                severity=alert.severity,
+                first_deferred_ms=now_ms(),
+                config=target.config or {},
+                attempt_no=attempt_no,
+                reason="retry",
+                last_error=last_error,
+                attempt_history=tuple(history),
+            ),
+            due_ms=now_ms() + int(delay_s * 1000),
+        )
+        log.info(
+            "dispatcher.retry_scheduled",
+            alert_id=alert.id,
+            channel=target.channel,
+            attempt=attempt_no,
+            delay_s=round(delay_s, 3),
+        )
+
+    async def _abandon(
+        self,
+        alert_id: str,
+        target: ResolvedTarget,
+        *,
+        severity: str,
+        tenant: str,
+        reason: str,
+        error: str,
+        history: list[dict],
+    ) -> None:
+        """Push a terminal failure to the DLQ — every abandoned attempt has a
+        corresponding entry, so nothing is silently lost (07 §2 success metric)."""
+        await dlq.push(
+            alert_id=alert_id,
+            recipient_id=str(target.recipient_id),
+            channel=target.channel,
+            target=target.target,
+            severity=severity,
+            tenant=tenant,
+            reason=reason,
+            last_error=error,
+            attempt_history=history,
+            config=target.config or {},
+        )
+        log.info("dispatcher.abandoned", alert_id=alert_id, channel=target.channel, reason=reason)
 
     async def _record(self, status, alert_id, target, retry_count, provider_id, error) -> None:
         async with get_sessionmaker()() as session:

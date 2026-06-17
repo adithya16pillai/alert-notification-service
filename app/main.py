@@ -19,6 +19,7 @@ from app.audit import router as audit_router
 from app.channels import register_defaults
 from app.config import get_settings
 from app.db import dispose_engine
+from app.dlq import dlq_router
 from app.errors import AppError, ValidationError
 from app.ingestion import dedup_router
 from app.ingestion import router as ingestion_router
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
 
     app.include_router(ingestion_router)
     app.include_router(dedup_router)
+    app.include_router(dlq_router)
     app.include_router(recipients_router)
     app.include_router(subscriptions_router)
     app.include_router(rate_limit_router)

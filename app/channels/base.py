@@ -7,26 +7,27 @@ and a registry line — nothing else changes (04 §10 "≤ 1 day to add a channe
 Three things live here:
   - ``DeliveryRequest`` / ``DeliveryResult`` — the wire types. Results carry the
     three-way classification from 04 §6 (``sent`` / ``transient`` / ``permanent``).
-  - ``CircuitBreaker`` — per-channel, opens after N consecutive failures (04 §4).
-  - ``Channel`` / ``HttpChannel`` — base classes. ``HttpChannel`` owns one shared
+  - ``Channel`` / ``HttpChannel`` — base classes wired to the per-provider
+    Redis circuit breaker (07 §4). ``HttpChannel`` owns one shared
     ``httpx.AsyncClient`` per adapter (not per request), with HTTP/2, pooling, and
     the channel's policy timeout (04 §9).
 """
 
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from uuid import UUID
 
 import httpx
 
+from app.channels.circuit import get_breaker
 from app.channels.classification import Outcome
 from app.channels.policy import ChannelPolicy, get_policy
-from app.config import get_settings
-from app.errors import CircuitOpenError
 from app.observability.metrics import circuit_breaker_state
+
+#: Breaker state string -> the gauge's numeric encoding (0=closed,1=open,2=half).
+_STATE_GAUGE = {"closed": 0, "open": 1, "half_open": 2, "probe": 2}
 
 
 @dataclass(frozen=True)
@@ -86,64 +87,38 @@ class DeliveryResult:
         return cls(status=Outcome.PERMANENT_FAILURE, error=error)
 
 
-class CircuitBreaker:
-    """Per-channel breaker. Opens after N consecutive failures, half-opens after
-    a cooldown. Clock is ``time.monotonic`` (no wall clock, immune to NTP steps).
-
-    A per-*provider* breaker is the whole point: Slack going down must not stop
-    email. A global breaker would couple unrelated failures (04 §9, §11).
-    """
-
-    def __init__(self, name: str = "") -> None:
-        s = get_settings()
-        self._name = name
-        self._threshold = s.circuit_failure_threshold
-        self._reset_after = s.circuit_reset_seconds
-        self._failures = 0
-        self._opened_at: float | None = None
-
-    def _set_state_metric(self, value: int) -> None:
-        if self._name:
-            circuit_breaker_state.labels(channel=self._name).set(value)
-
-    def check(self) -> None:
-        if self._opened_at is None:
-            return
-        if time.monotonic() - self._opened_at >= self._reset_after:
-            self._opened_at = None  # half-open: allow one trial
-            self._set_state_metric(2)  # half-open
-            return
-        raise CircuitOpenError("channel circuit open")
-
-    def record(self, ok: bool) -> None:
-        if ok:
-            self._failures = 0
-            self._opened_at = None
-            self._set_state_metric(0)  # closed
-        else:
-            self._failures += 1
-            if self._failures >= self._threshold:
-                self._opened_at = time.monotonic()
-                self._set_state_metric(1)  # open
-
-
 class Channel(ABC):
     """Base adapter. Subclasses set ``name`` and implement ``_deliver``.
 
     ``policy`` (timeout, retry budget, backoff) comes from the 04 §5 table keyed
-    by ``name``; the dispatcher reads it to drive retries.
+    by ``name``; the dispatcher reads it to drive retries. Every call is guarded
+    by the per-provider Redis circuit breaker (07 §4).
     """
 
     name: str
 
     def __init__(self) -> None:
-        self._breaker = CircuitBreaker(self.name)
+        self._breaker = get_breaker()
         self.policy: ChannelPolicy = get_policy(self.name)
 
+    def provider_key(self, req: DeliveryRequest) -> str:
+        """Breaker identity for this request. Single-endpoint channels share one
+        provider (the channel name); webhooks override this to key per receiver so
+        one broken receiver can't trip every webhook (07 §4.2)."""
+        return self.name
+
     async def send(self, req: DeliveryRequest) -> DeliveryResult:
-        self._breaker.check()
+        """Guarded send: when the provider's breaker is open we fast-fail in
+        <10ms with a *transient* result (07 §4.4) — never calling the provider —
+        so the dispatcher reschedules it. The retry delay typically exceeds the
+        open timeout, so the next attempt meets a half-open circuit."""
+        provider = self.provider_key(req)
+        if await self._breaker.allow(provider) == "open":
+            circuit_breaker_state.labels(channel=self.name).set(_STATE_GAUGE["open"])
+            return DeliveryResult.transient("circuit_open")
         result = await self._deliver(req)
-        self._breaker.record(result.ok)
+        new_state = await self._breaker.record(provider, result.ok)
+        circuit_breaker_state.labels(channel=self.name).set(_STATE_GAUGE[new_state])
         return result
 
     @abstractmethod
@@ -153,12 +128,15 @@ class Channel(ABC):
         raise NotImplementedError
 
     async def health_check(self) -> bool:
-        """Cheap liveness probe (04 §6). Default: breaker not open."""
-        try:
-            self._breaker.check()
-            return True
-        except CircuitOpenError:
-            return False
+        """Cheap liveness probe (04 §6). Default: the provider's breaker is not
+        open. Read-only — it does not consume the half-open probe."""
+        return await self._breaker.state(self.provider_key_for_health()) != "open"
+
+    def provider_key_for_health(self) -> str:
+        """Provider identity for health checks. Defaults to the channel name;
+        per-receiver channels (webhook) have no single health identity, so they
+        report on the channel-level key."""
+        return self.name
 
     async def aclose(self) -> None:  # noqa: B027 - intentional no-op default hook
         """Release adapter resources. Overridden by HTTP adapters; a no-op for

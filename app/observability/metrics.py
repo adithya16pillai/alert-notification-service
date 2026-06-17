@@ -26,6 +26,14 @@ alerts_deduped_total = Counter(
 )
 queue_depth = Gauge("ans_queue_depth", "Items in priority queue", ["severity"])
 dlq_depth = Gauge("ans_dlq_depth", "Items in dead-letter queue")
+# DLQ accounting (07 §5): terminal failures pushed in, by entry reason; and
+# operator-initiated replays back onto the delivery path.
+dlq_pushed_total = Counter(
+    "ans_dlq_pushed_total",
+    "Delivery attempts abandoned to the DLQ",
+    ["channel", "reason"],  # exhausted_retries | permanent_failure | rate_limit_expired
+)
+dlq_replays_total = Counter("ans_dlq_replays_total", "DLQ entries replayed by an operator")
 # Priority queue (02): critical time-to-dispatch + in-flight/visibility health.
 critical_ttd_seconds = Histogram(
     "ans_critical_ttd_seconds",

@@ -101,8 +101,22 @@ class Settings(BaseSettings):
     # circuit-breaker tunables shared across channels.
     channel_timeout_seconds: float = 5.0
     channel_max_retries: int = 3
+
+    # --- Circuit breaker (07 §4) — per-provider, state in Redis (circuit:{provider}).
+    # Trip after `threshold` failures inside a rolling `failure_window`; stay open
+    # for `open_timeout` then allow one half-open probe. The key TTL is a touch
+    # longer than the open timeout so a forgotten breaker self-heals (07 §4.3).
     circuit_failure_threshold: int = 5
-    circuit_reset_seconds: int = 30
+    circuit_failure_window_seconds: int = 30
+    circuit_open_timeout_seconds: int = 60
+    circuit_state_ttl_seconds: int = 120
+    circuit_key_prefix: str = "circuit"
+
+    # --- Dead letter queue (07 §5) — terminal failures, never lost. Redis stream
+    # capped by MAXLEN (~30 days at expected volume); older entries export to S3.
+    dlq_stream: str = "dlq:alerts"
+    dlq_maxlen: int = 1_000_000
+    dlq_max_error_bytes: int = 1024  # last_error is truncated to this (07 §5.2)
     # Provider credentials (04 §9): resolved from a secrets backend at runtime.
     # "env" reads ANS_SECRET_<NAME> (local/dev); "aws" reads AWS Secrets Manager.
     secrets_backend: str = "env"

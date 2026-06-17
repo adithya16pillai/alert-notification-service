@@ -32,8 +32,20 @@ def _retry_key(severity: str) -> str:
 
 @dataclass(frozen=True)
 class DeferredDelivery:
-    """A delivery parked for later retry. ``first_deferred_ms`` is preserved
-    across re-parks so the 60s cap measures total time deferred, not per-attempt.
+    """A delivery parked on the per-severity retry ZSET. One queue carries both
+    reasons (07 §7 "one retry queue, one DLQ"):
+
+    - ``reason="rate_limit"`` — parked because the token bucket was empty (05 §7).
+      ``first_deferred_ms`` is preserved across re-parks so the cap measures total
+      time deferred; ``attempt_no``/history stay zero so the member is stable and
+      re-parking just updates the score instead of duplicating.
+    - ``reason="retry"`` — a transient delivery failure rescheduled with backoff
+      (07 §3.3). ``attempt_no`` is the count of attempts already made and
+      ``attempt_history`` accumulates per-attempt summaries for the DLQ.
+
+    Keying the queue by severity (not channel, cf. 07 §3.3) is deliberate: a
+    parked ``critical`` is retried before a parked ``info``, preserving priority
+    on the retry path too.
     """
 
     alert_id: str
@@ -44,6 +56,10 @@ class DeferredDelivery:
     severity: str
     first_deferred_ms: int
     config: dict | None = None
+    attempt_no: int = 0
+    reason: str = "rate_limit"
+    last_error: str | None = None
+    attempt_history: tuple[dict, ...] = ()
 
     def to_member(self) -> str:
         # Sorted keys => a re-park of the same logical delivery produces an
@@ -52,7 +68,11 @@ class DeferredDelivery:
 
     @classmethod
     def from_member(cls, raw: str) -> DeferredDelivery:
-        return cls(**json.loads(raw))
+        data = json.loads(raw)
+        # JSON arrays decode to lists; keep the field a tuple so a round-trip is
+        # value-stable (the member string is what ZADD dedupes on).
+        data["attempt_history"] = tuple(data.get("attempt_history", ()))
+        return cls(**data)
 
 
 async def defer(delivery: DeferredDelivery, *, due_ms: int) -> None:

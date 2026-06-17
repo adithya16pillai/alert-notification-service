@@ -86,10 +86,10 @@ async def test_bypass_off_means_critical_is_limited(monkeypatch):
 async def test_deferred_past_cap_is_abandoned_to_dlq(monkeypatch):
     dlq, records = [], []
 
-    async def fake_push(alert_id, recipient_id, channel, error):
-        dlq.append((alert_id, channel, error))
+    async def fake_push(*, alert_id, channel, reason, last_error, **_kw):
+        dlq.append((alert_id, channel, reason, last_error))
 
-    monkeypatch.setattr(worker, "push_to_dlq", fake_push)
+    monkeypatch.setattr(worker.dlq, "push", fake_push)
 
     d = Dispatcher()
 
@@ -102,7 +102,8 @@ async def test_deferred_past_cap_is_abandoned_to_dlq(monkeypatch):
     expired = worker.now_ms() - (d.settings.rate_limit_max_defer_seconds * 1000 + 5000)
     await d._process_deferred(_deferred(first_deferred_ms=expired))
 
-    assert dlq and dlq[0][2] == "rate_limit_deferral_expired"
+    assert dlq and dlq[0][2] == "rate_limit_expired"
+    assert dlq[0][3] == "rate_limit_deferral_expired"
     assert ("abandoned", "rate_limit_deferral_expired") in records
 
 
@@ -140,12 +141,13 @@ async def test_deferred_now_allowed_is_delivered(monkeypatch):
     async def fake_load(alert_id):
         return _AlertSnapshot(id=alert_id, title="t", body="b", severity="high", tenant="t1")
 
-    async def fake_deliver(snapshot, target):
-        delivered.append((snapshot.id, target.channel))
+    async def fake_attempt(snapshot, target, *, attempt_no, history):
+        delivered.append((snapshot.id, target.channel, attempt_no))
 
     d._rate_limit_allows = allow_now  # type: ignore[method-assign]
     d._load_snapshot = fake_load  # type: ignore[method-assign]
-    d._deliver = fake_deliver  # type: ignore[method-assign]
+    d._attempt = fake_attempt  # type: ignore[method-assign]
 
     await d._process_deferred(_deferred(first_deferred_ms=worker.now_ms()))
-    assert delivered == [("01ABC", "email")]
+    # A cleared limit starts the delivery attempt sequence from scratch (attempt 0).
+    assert delivered == [("01ABC", "email", 0)]
